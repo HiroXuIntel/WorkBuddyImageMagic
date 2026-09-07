@@ -11,7 +11,6 @@ def read(rel_path: str) -> str:
 def test_required_skill_files_exist():
     for rel_path in [
         "info.json",
-        "meta.json",
         "SKILL.md",
         "scripts/client.py",
         "scripts/server.py",
@@ -26,7 +25,12 @@ def test_img2img_identity_and_model_are_configured():
     assert '"snake7gun/FLUX.2-klein-4B-int4-ov"' in read("info.json")
     assert '"dir_name": "FLUX.2-klein-4B-int4-ov"' in read("info.json")
     assert "name: local-img2img" in read("SKILL.md")
-    assert "local-img2img" in read("meta.json")
+    # `meta.json` was removed during v2.4 compliance migration; the plugin.json
+    # in the parent expert package is now the canonical identity record.
+    plugin = (SKILL_ROOT.parent.parent / ".codebuddy-plugin" / "plugin.json").read_text(
+        encoding="utf-8"
+    )
+    assert "./skills/local-img2img" in plugin
 
 
 def test_client_server_use_img2img_runtime_contract():

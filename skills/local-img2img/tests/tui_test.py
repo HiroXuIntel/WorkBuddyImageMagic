@@ -123,7 +123,7 @@ class Img2ImgApp(App):
             log.write_line(f"[ERROR] server.py not found at {server_py}")
             return
 
-        venv_python = OPENVINO_ROOT / "venv" / "img2img" / "Scripts" / "pythonw.exe"
+        venv_python = OPENVINO_ROOT / "venv" / "img2img" / "Scripts" / "python.exe"
         if not venv_python.exists():
             venv_python = Path(sys.executable)
 

@@ -1,5 +1,5 @@
 {
-    "venv_name": "t2i-tts",
+    "venv_name": "img2img",
     "python_version": "3.11",
     "mem_need_gb": 8.5,
     "download_wait_timeout_minutes": -1,
