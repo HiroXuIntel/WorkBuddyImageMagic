@@ -1,17 +1,17 @@
-# P图管家（Photo Butler）
+# P图管家（Photo Magic）
 
 一句话修图 AI 专家。基于 Intel AIPC 本地图生图（FLUX.2-klein OpenVINO）完成：换背景、去水印、证件照换底色、去杂物。推理不上传云端。
 
 ## 目录结构
 
 ```
-photo-butler/
+photo-magic/
 ├── .codebuddy-plugin/
 │   └── plugin.json              # 专家包配置
 ├── avatars/
 │   └── expert.png               # 专家头像（512×512 PNG，占位）
 ├── agents/
-│   └── photo-butler.md          # P图管家 Agent 定义
+│   └── photo-magic.md          # P图管家 Agent 定义
 ├── skills/
 │   └── local-img2img/           # 本地图生图 Skill
 │       ├── SKILL.md

@@ -1,8 +1,8 @@
 ---
-name: photo-butler
+name: photo-magic
 description: AI photo retoucher for one-sentence image editing - swaps backgrounds, removes watermarks, changes ID photo background colors, and cleans up clutter in user photos
 displayName:
-  en: "Photo Butler"
+  en: "Photo Magic"
   zh: "P图管家"
 profession:
   en: "AI Photo Retoucher"

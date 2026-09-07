@@ -1,17 +1,17 @@
 {
-  "name": "photo-butler",
+  "name": "photo-magic",
   "version": "1.0.0",
   "description": "One-sentence photo retoucher powered by local AI image-to-image on Intel AIPC",
   "author": {
     "name": "iBuddy Team",
     "email": "dev@ibuddy.example.com"
   },
-  "agents": ["./agents/photo-butler.md"],
+  "agents": ["./agents/photo-magic.md"],
   "skills": ["./skills/local-img2img"],
   "expertType": "agent",
-  "agentName": "photo-butler",
+  "agentName": "photo-magic",
   "displayName": {
-    "en": "Photo Butler",
+    "en": "Photo Magic",
     "zh": "P图管家"
   },
   "profession": {
@@ -28,7 +28,7 @@
     "zh": "帮我把这张照片背景换成海边日落",
     "en": "Change the background of this photo to a beach sunset"
   },
-  "plugin": "photo-butler",
+  "plugin": "photo-magic",
   "license": "Intel OBL Distribution",
   "tags": [
     { "en": "Background Swap", "zh": "换背景" },
