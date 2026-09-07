@@ -672,6 +672,29 @@ def _restart_and_wait(log_path: Path | None) -> tuple[str, str]:
     return _wait_for_running(log_path, deadline)
 
 
+def _humanize_init_error(detail: str) -> str:
+    text = detail or ""
+    lowered = text.lower()
+    if (
+        "m_weights" in text
+        or "bin file cannot be found" in lowered
+        or "empty weights" in lowered
+        or "missing weight bins" in lowered
+        or "missing files:" in lowered
+    ):
+        return (
+            "模型权重不完整（缺少或为空的 .bin），不是 Python 依赖安装失败。"
+            "下次运行会自动重新下载模型。\n"
+            f"{text}"
+        )
+    if "install-env" in lowered or "no module named" in lowered:
+        return (
+            "运行环境依赖缺失。请先执行 scripts\\install-env.ps1 完成首次安装。\n"
+            f"{text}"
+        )
+    return text
+
+
 def _cmd_request(reference_image_path: str, prompt: str, log_path: Path | None = None) -> int:
     reference_image = Path(reference_image_path).expanduser()
     if not reference_image.exists() or not reference_image.is_file():
@@ -726,7 +749,7 @@ def _cmd_request(reference_image_path: str, prompt: str, log_path: Path | None =
     if outcome == "error":
         _log_message(log_path, f"server reports init error after retries: {detail}")
         print(Fore.RED + "❌ 服务器初始化失败:" + Style.RESET_ALL)
-        print(detail)
+        print(_humanize_init_error(detail))
         _delete_pending_request(log_path)
         return 1
 

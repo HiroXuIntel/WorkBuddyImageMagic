@@ -50,19 +50,45 @@ class ModelInfo:
 
 
 def validate_model_dir(local_dir: Path, required_files: Sequence[str]) -> ModelValidation:
+    """Return ok only when required files exist, are non-empty, and every
+    OpenVINO IR ``*.xml`` has a non-empty companion ``*.bin``.
+
+    Checking only ``model_index.json`` / ``vae_bn_stats.npz`` is not enough:
+    an interrupted download can leave those small files while the multi-GB
+    weight ``.bin`` files are still missing. Loading then fails with
+    ``Empty weights data in bin file``, which callers often misread as a
+    Python dependency install failure.
+    """
     if not local_dir.is_dir():
         return ModelValidation(ok=False, reason="directory missing")
 
-    missing_files = [
-        relative_path
-        for relative_path in required_files
-        if not (local_dir / relative_path).is_file()
-    ]
+    missing_files: list[str] = []
+    empty_files: list[str] = []
+    for relative_path in required_files:
+        path = local_dir / relative_path
+        if not path.is_file():
+            missing_files.append(relative_path)
+        elif path.stat().st_size <= 0:
+            empty_files.append(relative_path)
+
+    missing_bins: list[str] = []
+    for xml_path in local_dir.rglob("openvino*.xml"):
+        bin_path = xml_path.with_suffix(".bin")
+        rel = str(bin_path.relative_to(local_dir)).replace("\\", "/")
+        if not bin_path.is_file():
+            missing_bins.append(rel)
+        elif bin_path.stat().st_size < 1024:
+            empty_files.append(rel)
+
+    problems: list[str] = []
     if missing_files:
-        return ModelValidation(
-            ok=False,
-            reason=f"missing files: {', '.join(missing_files)}",
-        )
+        problems.append(f"missing files: {', '.join(missing_files)}")
+    if empty_files:
+        problems.append(f"empty files: {', '.join(empty_files)}")
+    if missing_bins:
+        problems.append(f"missing weight bins: {', '.join(missing_bins)}")
+    if problems:
+        return ModelValidation(ok=False, reason="; ".join(problems))
     return ModelValidation(ok=True)
 
 
@@ -94,6 +120,19 @@ def _backup_invalid_model_dir(local_dir: Path, models_root: Path) -> Path:
         backup_dir = local_dir.with_name(f"{local_dir.name}.invalid-{suffix}")
     _assert_under_models_root(backup_dir, models_root)
     os.replace(local_dir, backup_dir)
+    return backup_dir
+
+
+def invalidate_model_dir(
+    local_dir: Path,
+    models_root: Path,
+    logger: Callable[[str], None] | None = None,
+) -> Path | None:
+    """Move a broken model directory aside so the next ensure_models re-downloads."""
+    if not local_dir.exists():
+        return None
+    backup_dir = _backup_invalid_model_dir(local_dir, models_root)
+    _emit(logger, f"invalidated model dir {local_dir} -> {backup_dir}")
     return backup_dir
 
 
@@ -613,6 +652,7 @@ __all__ = [
     "ModelValidation",
     "download_required_model",
     "ensure_models",
+    "invalidate_model_dir",
     "load_model_infos",
     "load_skill_info",
     "validate_model_dir",

@@ -35,6 +35,7 @@ from typing import Any, Optional
 from model_download import (
     ensure_models,
     get_download_progress,
+    invalidate_model_dir,
     load_model_infos,
     validate_model_dir,
 )
@@ -230,8 +231,25 @@ class Server:
                 self.loaded_device = device
                 self.state = STATE_RUNNING
             self.log(f"init thread: pipeline ready on device={device}")
-        except Exception:
+        except Exception as exc:
             error_text = traceback.format_exc()
+            detail = str(exc)
+            if (
+                "m_weights" in detail
+                or "bin file cannot be found" in detail.lower()
+                or "empty weights" in detail.lower()
+            ):
+                try:
+                    invalidate_model_dir(MODEL_DIR, MODELS_ROOT, logger=self.log)
+                    self.log(
+                        "init thread: incomplete model weights detected; "
+                        "invalidated model dir so the next start re-downloads"
+                    )
+                except Exception:
+                    self.log(
+                        "init thread: failed to invalidate incomplete model:\n"
+                        + traceback.format_exc()
+                    )
             with self.runtime_lock:
                 self.init_error = error_text
                 self.state = STATE_ERROR

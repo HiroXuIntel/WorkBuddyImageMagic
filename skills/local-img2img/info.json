@@ -10,7 +10,14 @@
             "dir_name": "FLUX.2-klein-4B-int4-ov",
             "required_files": [
                 "model_index.json",
-                "vae_bn_stats.npz"
+                "vae_bn_stats.npz",
+                "text_encoder/openvino_model.xml",
+                "text_encoder/openvino_model.bin",
+                "transformer/openvino_model.xml",
+                "transformer/openvino_model.bin",
+                "vae_decoder/openvino_model.bin",
+                "vae_encoder/openvino_model.bin",
+                "tokenizer/openvino_tokenizer.bin"
             ]
         }
     ]
