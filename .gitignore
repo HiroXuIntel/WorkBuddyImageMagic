@@ -19,3 +19,6 @@ wheels/
 *.tmp
 .DS_Store
 Thumbs.db
+
+# 提交用的压缩包不入 git（避免 .git / __pycache__ / .log 等非专家文件被一并提交）
+*.zip

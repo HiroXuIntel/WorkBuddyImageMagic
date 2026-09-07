@@ -4,7 +4,7 @@
   "description": "One-sentence photo retoucher powered by local AI image-to-image on Intel AIPC",
   "author": {
     "name": "iBuddy Team",
-    "email": "dev@ibuddy.example.com"
+    "email": "haoruo.xu@intel.com"
   },
   "agents": ["./agents/photo-magic.md"],
   "skills": ["./skills/local-img2img"],
@@ -20,7 +20,7 @@
   },
   "displayDescription": {
     "en": "One-sentence photo retoucher driven by local AI image-to-image. Swap backgrounds, remove watermarks, change ID-photo background colors, and clean up clutter in seconds.",
-    "zh": "一句话修图管家，本地 AI 图生图驱动，换背景、去水印、证件照换底色、去杂物，秒级输出专业级结果。"
+    "zh": "一句话修图管家，本地 AI 图生图驱动，换背景、去水印、证件照换底色、去杂物，几秒内输出专业级修图结果。"
   },
   "avatar": "avatars/expert.png",
   "categoryId": "06-ContentCreative",

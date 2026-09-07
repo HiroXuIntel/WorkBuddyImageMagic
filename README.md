@@ -33,11 +33,21 @@ photo-magic/
 
 ## 运行前提
 
-- **仅支持 Intel AIPC 平台（Windows）**。运行前会调用 `bin/platform.exe --is-aipc` 校验。
-- 首次使用需要联网：
-  - 通过 `scripts/install-env.ps1` 安装 Python 虚拟环境与 `requirements.txt` 依赖；
-  - 通过 `scripts/run.ps1` 首次调用时自动下载 FLUX.2-klein OpenVINO 模型。
-- 内存：建议 ≥ 8.5 GB 可用（模型默认在 GPU 上推理）。
+- **仅支持 Intel AIPC 平台（Windows）**。运行时需 `bin/platform.exe --is-aipc` 返回 1；非 AIPC 平台直接拒绝执行。
+- **首次使用需要联网**——运行期完整组件由 `install-env.ps1` 与 `run.ps1` 自动装配：
+
+  | 组件 | 大小 | 由谁装 | 备注 |
+  |---|---|---|---|
+  | VC++ 2015-2022 x64 运行时 | ~25 MB | `install-env.ps1` Step 0 | 缺失会触发 `WinError 1114` |
+  | uv 包管理器（`bin/uv.exe`） | ~62 MB | `install-env.ps1` Step 1 | 已带则跳过；缺失时从 gitcode 镜像下载 |
+  | Python 3.11 虚拟环境 | ~50 MB | `install-env.ps1` Step 2 | 路径 `~/.openvino/venv/t2i-tts` |
+  | Python 依赖（`requirements.txt`） | ~2 GB | `install-env.ps1` Step 3 | 含 PyTorch / OpenVINO / Diffusers |
+  | FLUX.2-klein OpenVINO 模型 | ~6 GB | `run.ps1` 首次调用 | `snake7gun/FLUX.2-klein-4B-int4-ov` |
+  | `bin/openvino_genai/` 原生模块 | 已打包 | （随专家包） | **仅兼容 Python 3.11**（cp311 .pyd） |
+  | **合计首次下载/安装** | **~8-9 GB** | | |
+
+- **内存**：建议 ≥ 8.5 GB 可用（模型默认在 GPU 上推理）。
+- **故障排查**：若 `import openvino_genai` 失败，确认 venv 是 3.11（`python --version`），非 3.11 时该 .pyd 无法加载；删除 `~/.openvino/venv/t2i-tts` 后重跑 `install-env.ps1` 即可。
 
 ## 快速测试
 
