@@ -1,0 +1,43 @@
+{
+  "name": "photo-butler",
+  "version": "1.0.0",
+  "description": "One-sentence photo retoucher powered by local AI image-to-image on Intel AIPC",
+  "author": {
+    "name": "iBuddy Team",
+    "email": "dev@ibuddy.example.com"
+  },
+  "agents": ["./agents/photo-butler.md"],
+  "skills": ["./skills/local-img2img"],
+  "expertType": "agent",
+  "agentName": "photo-butler",
+  "displayName": {
+    "en": "Photo Butler",
+    "zh": "P图管家"
+  },
+  "profession": {
+    "en": "AI Photo Retoucher",
+    "zh": "AI 修图管家"
+  },
+  "displayDescription": {
+    "en": "One-sentence photo retoucher driven by local AI image-to-image. Swap backgrounds, remove watermarks, change ID-photo background colors, and clean up clutter in seconds.",
+    "zh": "一句话修图管家，本地 AI 图生图驱动，换背景、去水印、证件照换底色、去杂物，秒级输出专业级结果。"
+  },
+  "avatar": "avatars/expert.png",
+  "categoryId": "06-ContentCreative",
+  "defaultInitPrompt": {
+    "zh": "帮我把这张照片背景换成海边日落",
+    "en": "Change the background of this photo to a beach sunset"
+  },
+  "plugin": "photo-butler",
+  "license": "Intel OBL Distribution",
+  "tags": [
+    { "en": "Background Swap", "zh": "换背景" },
+    { "en": "Watermark Removal", "zh": "去水印" },
+    { "en": "ID Photo", "zh": "证件照" }
+  ],
+  "quickPrompts": [
+    { "en": "Change the background of this photo to a beach sunset", "zh": "帮我把这张照片背景换成海边日落" },
+    { "en": "Remove the watermark from this image", "zh": "帮我去掉这张图上的水印" },
+    { "en": "Change my ID photo background to blue", "zh": "帮我把证件照底色换成蓝色" }
+  ]
+}

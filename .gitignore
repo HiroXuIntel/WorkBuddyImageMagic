@@ -1,0 +1,21 @@
+# Python 编译产物
+# 注意：不要用 *.py[cod] 通配，会误伤 Windows 原生扩展 *.pyd（OpenVINO 核心模块）
+__pycache__/
+*.pyc
+*.pyo
+*.pyd.bak
+
+# 虚拟环境
+venv/
+.venv/
+env/
+
+# 运行期下载的依赖与模型（首次运行时脚本自动拉取）
+models/
+wheels/
+
+# 日志与临时文件
+*.log
+*.tmp
+.DS_Store
+Thumbs.db

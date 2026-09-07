@@ -1,0 +1,16 @@
+# 二进制文件禁止换行符转换
+*.exe binary
+*.dll binary
+*.pyd binary
+*.lib binary
+*.exp binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+
+# 脚本统一使用 LF 存储，Windows 检出时转 CRLF
+*.ps1 text eol=crlf
+*.py  text eol=lf
+*.sh  text eol=lf
+*.md  text eol=lf
+*.json text eol=lf
