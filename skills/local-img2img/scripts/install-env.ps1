@@ -32,21 +32,97 @@ Add-Content $LogFile "[$(Get-Date)] Log initialized for $SkillRoot."
 
 function Write-Log($msg) { Add-Content $LogFile "[$(Get-Date)] $msg" }
 
-# Fast path: venv + pip + requirements hash already match → do not re-run
-# VC++/uv/pip install. run.ps1 calls this script on every edit, so without
-# this early exit users see a full "[0/4]…[4/4]" setup and may think deps
-# are being reinstalled even when only checks run (or, with a shared wrong
-# venv_name, actually do reinstall every time).
+# PowerShell occasionally leaves $LASTEXITCODE as $null after native commands
+# (especially with stdout/stderr redirection). Treating null as failure then
+# re-runs `uv pip install` and can corrupt/remove OpenVINO dist-info metadata.
+function Get-NativeExitCode {
+    param([int]$DefaultWhenNull = 1)
+    if ($null -eq $LASTEXITCODE) { return $DefaultWhenNull }
+    return [int]$LASTEXITCODE
+}
+
+function Invoke-VenvPython {
+    param(
+        [string]$PythonExe,
+        [string[]]$ArgumentList,
+        [switch]$Quiet
+    )
+    # Prefer Start-Process so ExitCode is always an int (never null).
+    $stdout = [System.IO.Path]::GetTempFileName()
+    $stderr = [System.IO.Path]::GetTempFileName()
+    try {
+        $p = Start-Process -FilePath $PythonExe `
+            -ArgumentList $ArgumentList `
+            -Wait -PassThru -NoNewWindow `
+            -RedirectStandardOutput $stdout `
+            -RedirectStandardError $stderr
+        if (-not $Quiet) {
+            Get-Content $stdout -ErrorAction SilentlyContinue | Write-Host
+            Get-Content $stderr -ErrorAction SilentlyContinue | Write-Host
+        }
+        if ($null -eq $p.ExitCode) { return 1 }
+        return [int]$p.ExitCode
+    } finally {
+        Remove-Item $stdout, $stderr -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Test-OpenVinoEnvHealthy {
+    param([string]$PythonExe)
+    # Require both importable packages AND intact dist-info metadata.
+    # Missing metadata is what makes every later run think OpenVINO is absent
+    # and trigger a multi-GB reinstall.
+    $probe = @'
+import importlib.metadata as md
+import sys
+
+need = [
+    "openvino",
+    "openvino-tokenizers",
+    "torch",
+    "diffusers",
+    "colorama",
+    "Pillow",
+]
+missing_meta = []
+for name in need:
+    try:
+        md.version(name)
+    except md.PackageNotFoundError:
+        missing_meta.append(name)
+if missing_meta:
+    print("MISSING_META:" + ",".join(missing_meta))
+    sys.exit(2)
+try:
+    import openvino  # noqa: F401
+except Exception as exc:
+    print("IMPORT_FAIL:" + type(exc).__name__ + ":" + str(exc))
+    sys.exit(3)
+sys.exit(0)
+'@
+    $tmp = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), ("ov-health-" + [guid]::NewGuid().ToString("n") + ".py"))
+    try {
+        Set-Content -Path $tmp -Value $probe -Encoding ascii
+        return (Invoke-VenvPython -PythonExe $PythonExe -ArgumentList @($tmp) -Quiet) -eq 0
+    } finally {
+        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# Fast path: sha matches AND OpenVINO metadata/import healthy → skip all setup.
+$ForceRepairPackages = $false
 if ((Test-Path $VenvPy) -and (Test-Path $RequirementsFile) -and (Test-Path $RequirementsShaFile)) {
     $ExistingRequirementsHash = (Get-Content $RequirementsShaFile -Raw).Trim()
     $RequirementsHash = (Get-FileHash -Path $RequirementsFile -Algorithm SHA256).Hash
     if ($ExistingRequirementsHash -eq $RequirementsHash) {
-        & $VenvPy -m pip --version > $null 2>&1
-        if ($LASTEXITCODE -eq 0) {
+        if (Test-OpenVinoEnvHealthy -PythonExe $VenvPy) {
             Write-Host "Python environment already ready at $VenvDir"
-            Write-Log "Fast path: venv ready and requirements.sha matches. Skipping install."
+            Write-Log "Fast path: requirements.sha match + openvino metadata healthy. Skipping install."
             exit 0
         }
+        $ForceRepairPackages = $true
+        Write-Log "requirements.sha matched but OpenVINO metadata/import unhealthy; repairing instead of skipping."
+        Write-Host "WARN: OpenVINO package metadata missing or broken; repairing venv packages..."
     }
 }
 
@@ -113,7 +189,8 @@ sys.exit(1)
 '@
 
     $installedVersion = Invoke-PythonScript -PythonExe $PythonExe -Script $script -Arguments @($PackageName) -SuppressStderr
-    if ($LASTEXITCODE -ne 0 -or -not $installedVersion) {
+    $probeCode = Get-NativeExitCode -DefaultWhenNull 1
+    if ($probeCode -ne 0 -or -not $installedVersion) {
         return $null
     }
 
@@ -162,7 +239,7 @@ sys.exit(0 if split_version(installed) < split_version(wheel) else 1)
 '@
 
     Invoke-PythonScript -PythonExe $PythonExe -Script $script -Arguments @($InstalledVersion, $WheelVersion) | Out-Null
-    return $LASTEXITCODE -eq 0
+    return (Get-NativeExitCode -DefaultWhenNull 1) -eq 0
 }
 
 # --- Step 0: Ensure Microsoft Visual C++ runtime (vcruntime140 / msvcp140) ---
@@ -303,7 +380,7 @@ if (-not (Test-Path $VenvPy)) {
     # outer `if (-not (Test-Path $VenvPy))` guard means we only get here when
     # the venv is missing or incomplete, so clearing is always safe.
     & $UvExe venv --clear --seed --python $PythonVersion $VenvDir
-    if ($LASTEXITCODE -ne 0) {
+    if ((Get-NativeExitCode) -ne 0) {
         Write-Host 'ERROR: Failed to create Python virtual environment.'
         exit 1
     }
@@ -313,18 +390,18 @@ if (-not (Test-Path $VenvPy)) {
 # it. The --seed flag above only runs on the create branch, so a venv built by
 # an OLDER install-env.ps1 (before --seed was added) is reused as-is and stays
 # pip-less, causing every `uv pip install` to fail with "No module named pip".
-# Probe pip on every run and seed it on demand so pre-existing pip-less venvs
-# recover without a full rebuild. Cheap when pip is already there (one --version call).
-& $VenvPy -m pip --version > $null 2>&1
-if ($LASTEXITCODE -ne 0) {
+# Probe pip via Start-Process (ExitCode never null) so a flaky $LASTEXITCODE
+# does not falsely trigger pip reinstall loops.
+$pipProbe = Invoke-VenvPython -PythonExe $VenvPy -ArgumentList @('-m', 'pip', '--version') -Quiet
+if ($pipProbe -ne 0) {
     Write-Host '  pip missing from venv (older uv venv had no --seed); installing pip...'
     Write-Log 'pip missing from venv; seeding pip via uv pip install.'
     & $UvExe pip install --python $VenvPy pip --index-url $MirrorIndex
-    if ($LASTEXITCODE -ne 0) {
+    if ((Get-NativeExitCode) -ne 0) {
         Write-Host '  Tsinghua mirror failed, retrying pip install from official PyPI...'
         & $UvExe pip install --python $VenvPy pip
     }
-    if ($LASTEXITCODE -ne 0) {
+    if ((Get-NativeExitCode) -ne 0) {
         Write-Host 'ERROR: Failed to install pip into the venv.'
         Write-Log 'ERROR: Failed to seed pip into the venv.'
         exit 1
@@ -341,10 +418,15 @@ if (Test-Path $RequirementsFile) {
     $RequirementsHash = (Get-FileHash -Path $RequirementsFile -Algorithm SHA256).Hash
     $ExistingRequirementsHash = if (Test-Path $RequirementsShaFile) { (Get-Content $RequirementsShaFile -Raw).Trim() } else { '' }
 
-    if ($ExistingRequirementsHash -eq $RequirementsHash) {
-        Write-Host '  requirements.txt unchanged. Skipping install.'
-        Write-Log 'requirements.txt unchanged. Skipping install.'
+    if ((-not $ForceRepairPackages) -and ($ExistingRequirementsHash -eq $RequirementsHash) -and (Test-OpenVinoEnvHealthy -PythonExe $VenvPy)) {
+        Write-Host '  requirements.txt unchanged and packages healthy. Skipping install.'
+        Write-Log 'requirements.txt unchanged and packages healthy. Skipping install.'
     } else {
+        if ($ForceRepairPackages) {
+            Write-Host '  Repairing packages (OpenVINO metadata was missing/broken)...'
+            # Drop stale sha so a failed repair cannot claim success next run.
+            Remove-Item $RequirementsShaFile -Force -ErrorAction SilentlyContinue
+        }
         $basePipArgs = @('pip', 'install', '--python', $VenvPy, '-r', $RequirementsFile)
         if (Test-Path $WheelsDir) {
             $basePipArgs += '--find-links'
@@ -354,18 +436,25 @@ if (Test-Path $RequirementsFile) {
         Write-Host "  Installing from requirements.txt (Tsinghua mirror)..."
         Write-Log "Installing from requirements.txt with args: $($basePipArgs -join ' ') --index-url $MirrorIndex"
         & $UvExe @basePipArgs --index-url $MirrorIndex
-        if ($LASTEXITCODE -ne 0) {
+        if ((Get-NativeExitCode) -ne 0) {
             Write-Host '  Tsinghua mirror failed, retrying from official PyPI...'
             Write-Log '  Tsinghua mirror failed, retrying from official PyPI...'
             & $UvExe @basePipArgs
-            if ($LASTEXITCODE -ne 0) {
+            if ((Get-NativeExitCode) -ne 0) {
                 Write-Host 'ERROR: Failed to install requirements.'
                 Write-Log 'ERROR: Failed to install requirements.'
                 exit 1
             }
         }
 
+        if (-not (Test-OpenVinoEnvHealthy -PythonExe $VenvPy)) {
+            Write-Host 'ERROR: Requirements installed but OpenVINO metadata/import still unhealthy.'
+            Write-Log 'ERROR: post-install OpenVINO health check failed; not writing requirements.sha.'
+            exit 1
+        }
+
         Set-Content -Path $RequirementsShaFile -Value $RequirementsHash -Encoding ascii
+        Write-Log "Wrote requirements.sha after healthy install."
     }
 } else {
     Write-Host '  No requirements.txt found. Skipping.'
@@ -401,10 +490,10 @@ if (Test-Path $WheelsDir) {
 
             Write-Host "  Installing $($whl.Name) (Tsinghua mirror for deps)..."
             & $UvExe pip install --python $VenvPy $whl.FullName --index-url $MirrorIndex --find-links $WheelsDir
-            if ($LASTEXITCODE -ne 0) {
+            if ((Get-NativeExitCode) -ne 0) {
                 Write-Host "  Tsinghua mirror failed for $($whl.Name), retrying from official PyPI..."
                 & $UvExe pip install --python $VenvPy $whl.FullName --find-links $WheelsDir
-                if ($LASTEXITCODE -ne 0) {
+                if ((Get-NativeExitCode) -ne 0) {
                     Write-Host "ERROR: Failed to install $($whl.Name)."
                     exit 1
                 }

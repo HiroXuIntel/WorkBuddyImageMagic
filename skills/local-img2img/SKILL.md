@@ -23,7 +23,8 @@ scripts/run.ps1 "<image-path>" "<prompt>"
 
 - 仅两个参数：源图片绝对路径、编辑提示词。
 - 在 Windows 的 Bash 环境中，若直接调用失败，可用 `powershell -ExecutionPolicy Bypass -File scripts/run.ps1 "<image-path>" "<prompt>"` 执行。
-- 首次调用会自动下载 FLUX.2-klein OpenVINO 模型并构建 Python 环境。
+- 首次调用会自动下载 FLUX.2-klein OpenVINO 模型并构建 Python 环境；**仅第一次**需要完整安装。若上次下载停在 `.partial` 且文件已齐，会自动晋级为正式模型目录，不会整包重下。
+- 本地联调可直接复制 `templates/` 下四条提示词（见 `templates/README.md`），无需 WorkBuddy 胶囊/工作模式。
 - 输出为源图同目录下的 `<原文件名>_edited_<时间戳>.png`，不覆盖原图。
 
 示例：

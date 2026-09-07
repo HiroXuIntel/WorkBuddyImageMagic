@@ -33,7 +33,8 @@
   "tags": [
     { "en": "Background Swap", "zh": "换背景" },
     { "en": "Watermark Removal", "zh": "去水印" },
-    { "en": "ID Photo", "zh": "证件照" }
+    { "en": "ID Photo", "zh": "证件照" },
+    { "en": "Clutter Removal", "zh": "去杂物" }
   ],
   "quickPrompts": [
     { "en": "Change the background of this photo to a beach sunset", "zh": "帮我把这张照片背景换成海边日落" },

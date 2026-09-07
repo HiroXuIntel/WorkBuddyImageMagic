@@ -105,7 +105,8 @@ if ($ImagePath -eq '--continue') {
 } else {
     Write-Log 'Running scripts\install-env.ps1.'
     & "$SkillRoot\scripts\install-env.ps1" -SkillRoot $SkillRoot
-    if ($LASTEXITCODE -ne 0) { Pop-Location; exit 1 }
+    $installExit = if ($null -eq $LASTEXITCODE) { 1 } else { [int]$LASTEXITCODE }
+    if ($installExit -ne 0) { Pop-Location; exit $installExit }
     Write-Log 'scripts\install-env.ps1 completed successfully.'
 }
 
@@ -119,7 +120,7 @@ if ($ImagePath -eq '--continue') {
     Write-Log "Launching scripts\client.py --image-path `"$ImagePath`" -i `"$UserPrompt`"."
     & $VenvPy scripts\client.py --image-path $ImagePath -i $UserPrompt
 }
-$exitCode = $LASTEXITCODE
+$exitCode = if ($null -eq $LASTEXITCODE) { 1 } else { [int]$LASTEXITCODE }
 Write-Log "scripts\client.py exited with code $exitCode"
 Pop-Location
 exit $exitCode

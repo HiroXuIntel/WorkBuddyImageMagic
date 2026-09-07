@@ -470,6 +470,40 @@ def load_model_infos(info_json_path: Path) -> list[ModelInfo]:
     ]
 
 
+def _promote_partial_model(local_dir: Path, models_root: Path, logger=None) -> bool:
+    """If ``local_dir.partial`` already validates, rename it to ``local_dir``.
+
+    Interrupted first-time downloads often leave a complete ``.partial`` tree
+    that was never promoted (for example after a client timeout). Without this
+    step every later run treats the model as missing and re-enters download.
+    """
+    partial_dir = local_dir.with_name(f"{local_dir.name}.partial")
+    if not partial_dir.is_dir():
+        return False
+    # Caller must already know required_files; this helper only renames.
+    if local_dir.exists():
+        return False
+    try:
+        _assert_under_models_root(partial_dir, models_root)
+        _assert_under_models_root(local_dir, models_root)
+        os.replace(partial_dir, local_dir)
+        _emit(logger, f"promoted completed partial model {partial_dir.name} -> {local_dir}")
+        return True
+    except OSError as exc:
+        _emit(logger, f"failed to promote partial model {partial_dir}: {exc}")
+        # Fallback: copy then remove partial so a locked rename cannot loop forever.
+        try:
+            if local_dir.exists():
+                return False
+            shutil.copytree(partial_dir, local_dir)
+            shutil.rmtree(partial_dir, ignore_errors=True)
+            _emit(logger, f"copied completed partial model {partial_dir.name} -> {local_dir}")
+            return True
+        except OSError as copy_exc:
+            _emit(logger, f"fallback copy of partial model failed: {copy_exc}")
+            return False
+
+
 def ensure_models(
     models: list[ModelInfo],
     models_root: Path,
@@ -481,12 +515,25 @@ def ensure_models(
     While a download is running, progress is published to the module-level
     snapshot (see :func:`get_download_progress`) and, when supplied, pushed to
     ``progress_callback``. The snapshot is cleared once everything is on disk.
+
+    A finished ``.partial`` directory with all required files is promoted once
+    and never re-downloaded. Incomplete partials are resumed in place.
     """
+    for m in models:
+        local_dir = models_root / m.dir_name
+        if validate_model_dir(local_dir, m.required_files).ok:
+            continue
+        partial_dir = local_dir.with_name(f"{local_dir.name}.partial")
+        if validate_model_dir(partial_dir, m.required_files).ok:
+            if _promote_partial_model(local_dir, models_root, logger=logger):
+                continue
+
     missing = [
         m for m in models
         if not validate_model_dir(models_root / m.dir_name, m.required_files).ok
     ]
     if not missing:
+        _emit(logger, "all required models already present; skip download")
         return
 
     try:
@@ -502,9 +549,20 @@ def ensure_models(
     total_models = len(missing)
     for index, m in enumerate(missing, start=1):
         local_dir = models_root / m.dir_name
+        # Re-check: another process may have finished while we imported modelscope.
+        if validate_model_dir(local_dir, m.required_files).ok:
+            continue
+        partial_dir = local_dir.with_name(f"{local_dir.name}.partial")
+        if validate_model_dir(partial_dir, m.required_files).ok and _promote_partial_model(
+            local_dir, models_root, logger=logger
+        ):
+            continue
+
         validation = validate_model_dir(local_dir, m.required_files)
         if validation.reason and validation.reason != "directory missing":
-            _emit(logger, f"model {m.model_id} is incomplete: {validation.reason}; re-downloading")
+            _emit(logger, f"model {m.model_id} is incomplete: {validation.reason}; resuming download")
+        elif partial_dir.is_dir():
+            _emit(logger, f"resuming incomplete partial download for {m.model_id}")
 
         template = ModelDownloadTemplate(
             models_root=models_root,
@@ -532,7 +590,7 @@ def ensure_models(
 
     failed = [
         f"{m.model_id} ({validate_model_dir(models_root / m.dir_name, m.required_files).reason})"
-        for m in missing
+        for m in models
         if not validate_model_dir(models_root / m.dir_name, m.required_files).ok
     ]
     if failed:
