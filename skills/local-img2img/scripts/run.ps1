@@ -97,11 +97,13 @@ $VenvPy = Join-Path $VenvDir 'Scripts\python.exe'
 Write-Log "Resolved VENV_PY=$VenvPy"
 
 # --- Ensure environment ---
+# install-env.ps1 is idempotent: ready venv + matching requirements.sha exits
+# immediately. Still invoke it (except --continue) so a broken/missing env
+# self-heals without the caller needing a separate install step.
 if ($ImagePath -eq '--continue') {
     Write-Log 'Skipping scripts\install-env.ps1 for --continue.'
 } else {
     Write-Log 'Running scripts\install-env.ps1.'
-    Write-Host 'Setting up Python environment...'
     & "$SkillRoot\scripts\install-env.ps1" -SkillRoot $SkillRoot
     if ($LASTEXITCODE -ne 0) { Pop-Location; exit 1 }
     Write-Log 'scripts\install-env.ps1 completed successfully.'

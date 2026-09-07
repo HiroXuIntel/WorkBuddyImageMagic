@@ -20,6 +20,8 @@ $PythonVersion = if ($config.python_version) { $config.python_version } else { '
 
 $VenvDir = Join-Path $env:USERPROFILE ".openvino\venv\$VenvName"
 $VenvPy = Join-Path $VenvDir 'Scripts\python.exe'
+$RequirementsFile = Join-Path $SkillRoot 'requirements.txt'
+$RequirementsShaFile = Join-Path $VenvDir 'requirements.sha'
 
 # --- Logging ---
 $LogDir = Join-Path $env:USERPROFILE '.openvino\log'
@@ -29,6 +31,24 @@ $LogFile = Join-Path $LogDir "install-env-$LogTimestamp.log"
 Add-Content $LogFile "[$(Get-Date)] Log initialized for $SkillRoot."
 
 function Write-Log($msg) { Add-Content $LogFile "[$(Get-Date)] $msg" }
+
+# Fast path: venv + pip + requirements hash already match → do not re-run
+# VC++/uv/pip install. run.ps1 calls this script on every edit, so without
+# this early exit users see a full "[0/4]…[4/4]" setup and may think deps
+# are being reinstalled even when only checks run (or, with a shared wrong
+# venv_name, actually do reinstall every time).
+if ((Test-Path $VenvPy) -and (Test-Path $RequirementsFile) -and (Test-Path $RequirementsShaFile)) {
+    $ExistingRequirementsHash = (Get-Content $RequirementsShaFile -Raw).Trim()
+    $RequirementsHash = (Get-FileHash -Path $RequirementsFile -Algorithm SHA256).Hash
+    if ($ExistingRequirementsHash -eq $RequirementsHash) {
+        & $VenvPy -m pip --version > $null 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "Python environment already ready at $VenvDir"
+            Write-Log "Fast path: venv ready and requirements.sha matches. Skipping install."
+            exit 0
+        }
+    }
+}
 
 function Get-WheelPackageInfo {
     param(
@@ -314,12 +334,10 @@ Write-Host "  Python venv is ready."
 
 # --- Step 3: Install requirements.txt ---
 Write-Host '[3/4] Installing requirements...'
-$RequirementsFile = Join-Path $SkillRoot 'requirements.txt'
 $WheelsDir = Join-Path $SkillRoot 'wheels'
 Write-Log "Installing requirements from $RequirementsFile with wheels from $WheelsDir"
 
 if (Test-Path $RequirementsFile) {
-    $RequirementsShaFile = Join-Path $VenvDir 'requirements.sha'
     $RequirementsHash = (Get-FileHash -Path $RequirementsFile -Algorithm SHA256).Hash
     $ExistingRequirementsHash = if (Test-Path $RequirementsShaFile) { (Get-Content $RequirementsShaFile -Raw).Trim() } else { '' }
 
