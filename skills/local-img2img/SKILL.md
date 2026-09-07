@@ -15,7 +15,7 @@ user-invocable: false
 
 ## 调用方式
 
-通过 Bash 工具调用本技能 scripts 目录下的入口脚本：
+通过 Bash 工具**只调用**本技能入口脚本（一次即可跑完环境检查 + 推理）：
 
 ```
 scripts/run.ps1 "<image-path>" "<prompt>"
@@ -23,6 +23,7 @@ scripts/run.ps1 "<image-path>" "<prompt>"
 
 - 仅两个参数：源图片绝对路径、编辑提示词。
 - 在 Windows 的 Bash 环境中，若直接调用失败，可用 `powershell -ExecutionPolicy Bypass -File scripts/run.ps1 "<image-path>" "<prompt>"` 执行。
+- **不要单独再调 `client.py` / `server.py`**：`run.ps1` 会在环境就绪后自动启动推理客户端；若模型仍在下载（退出码 3），`run.ps1` 会自动 `--continue`，直到出图或硬失败。
 - 首次调用会自动下载 FLUX.2-klein OpenVINO 模型并构建 Python 环境；**仅第一次**需要完整安装。若上次下载停在 `.partial` 且**权重 `.bin` 已齐**，会自动晋级为正式模型目录；若只有 `model_index.json` 等小文件而缺少权重，会判定为不完整并重新下载，不会误当成「依赖安装失败」。
 - 本地联调可直接复制 `templates/` 下四条提示词（见 `templates/README.md`），无需 WorkBuddy 胶囊/工作模式。
 - 输出为源图同目录下的 `<原文件名>_edited_<时间戳>.png`，不覆盖原图。
@@ -38,14 +39,14 @@ scripts/run.ps1 "<image-path>" "<prompt>"
 
 ## 模型下载与续传
 
-- 若首次运行因下载模型而超时，客户端会以如下信息退出：
+- 下载未完成时，`client.py` 可能暂时退出码 3。**优先继续等同一个 `run.ps1` 进程自动续跑**；仅在你手动中断后，才需要：
 
   ```
-  模型正在下载, 请用命令`scripts\run.ps1 --continue`继续运行
+  scripts\run.ps1 --continue
   ```
 
-  此时重复执行 `scripts/run.ps1 --continue`，直到出现正常结果。
 - 下载过程中 stdout 里以 `模型下载中` 开头的行需如实转达给用户：首行立即展示，之后约每 5 分钟刷新一次（百分比、已下载/总量、速度、ETA）。
+- 阶段日志顺序：`[1/3] Environment check` → `[2/3] Start inference client` → `正在启动推理服务` / `等待模型就绪` / `开始生成` → `[3/3] Inference finished`。看到环境就绪**不等于**任务结束。
 
 ## 结果解读
 

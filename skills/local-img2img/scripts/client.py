@@ -702,15 +702,17 @@ def _cmd_request(reference_image_path: str, prompt: str, log_path: Path | None =
         return 3
 
     _log_message(log_path, f"processing request: image={str(reference_image)!r} prompt={prompt!r}")
+    print("正在启动推理服务（server-dog / img2img server）...", flush=True)
 
     deadline = _download_wait_deadline()
     try:
         _ensure_server(log_path)
     except RuntimeError as exc:
         _log_message(log_path, f"failed to ensure server: {exc}")
-        print(Fore.RED + str(exc) + Style.RESET_ALL)
+        print(Fore.RED + _humanize_init_error(str(exc)) + Style.RESET_ALL)
         return 2
 
+    print("等待模型就绪（下载或加载到 GPU）...", flush=True)
     outcome, detail = _wait_for_running(log_path, deadline)
     for attempt in range(2, ERROR_RETRY_MAX + 1):
         if outcome != "error":
@@ -743,6 +745,11 @@ def _cmd_request(reference_image_path: str, prompt: str, log_path: Path | None =
         if _PROGRESS_STATE.get("progress") is not None:
             _report_download_progress({}, log_path, force=True)
         print(Fore.YELLOW + "模型正在下载, 请用命令`scripts\\run.ps1 --continue`继续运行" + Style.RESET_ALL)
+        print(
+            Fore.YELLOW
+            + "（若通过 scripts\\run.ps1 启动，会自动 --continue，无需再手动调 client.py）"
+            + Style.RESET_ALL
+        )
         _log_message(log_path, "exiting with code 3: download still in progress")
         return 3
 
@@ -754,6 +761,7 @@ def _cmd_request(reference_image_path: str, prompt: str, log_path: Path | None =
         return 1
 
     # outcome == "running"
+    print("模型已就绪，开始生成...", flush=True)
     try:
         reply: dict = {}
         for attempt in range(1, ABNORMAL_IMAGE_RETRY_MAX + 1):

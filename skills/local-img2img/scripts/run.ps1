@@ -17,6 +17,12 @@ Add-Content $LogFile "[$(Get-Date)] Log initialized."
 
 function Write-Log($msg) { Add-Content $LogFile "[$(Get-Date)] $msg" }
 
+function Write-Stage($msg) {
+    Write-Host ""
+    Write-Host "==== $msg ====" -ForegroundColor Cyan
+    Write-Log $msg
+}
+
 Write-Log "run.ps1 started with image: $ImagePath prompt: $UserPrompt"
 
 if (-not $ImagePath) {
@@ -26,7 +32,9 @@ if (-not $ImagePath) {
     exit 1
 }
 
+$ContinueOnly = $false
 if ($ImagePath -eq '--continue') {
+    $ContinueOnly = $true
     Write-Host 'Resuming pending request ...'
 } else {
     if (-not $UserPrompt) {
@@ -46,6 +54,7 @@ if ($ImagePath -eq '--continue') {
 }
 
 # --- AIPC Check ---
+Write-Stage '[1/3] Environment check'
 $PlatformExe = Join-Path $PSScriptRoot '..\bin\platform.exe'
 Write-Log "Resolved PLATFORM_EXE=$PlatformExe"
 if (-not (Test-Path $PlatformExe)) {
@@ -97,31 +106,84 @@ $VenvPy = Join-Path $VenvDir 'Scripts\python.exe'
 Write-Log "Resolved VENV_PY=$VenvPy"
 
 # --- Ensure environment ---
-# install-env.ps1 is idempotent: ready venv + matching requirements.sha exits
-# immediately. Still invoke it (except --continue) so a broken/missing env
-# self-heals without the caller needing a separate install step.
-if ($ImagePath -eq '--continue') {
-    Write-Log 'Skipping scripts\install-env.ps1 for --continue.'
-} else {
-    Write-Log 'Running scripts\install-env.ps1.'
-    & "$SkillRoot\scripts\install-env.ps1" -SkillRoot $SkillRoot
-    $installExit = if ($null -eq $LASTEXITCODE) { 1 } else { [int]$LASTEXITCODE }
-    if ($installExit -ne 0) { Pop-Location; exit $installExit }
+# Run install-env in a *separate* powershell process so any `exit` inside
+# install-env.ps1 cannot terminate this run.ps1 before client.py starts.
+# (Some hosts / nested invocations treat nested `exit` as ending the whole job.)
+if (-not $ContinueOnly) {
+    Write-Log 'Running scripts\install-env.ps1 in isolated process.'
+    $installArgs = @(
+        '-NoProfile',
+        '-ExecutionPolicy', 'Bypass',
+        '-File', (Join-Path $SkillRoot 'scripts\install-env.ps1'),
+        '-SkillRoot', $SkillRoot
+    )
+    $installProc = Start-Process -FilePath 'powershell.exe' `
+        -ArgumentList $installArgs `
+        -Wait -PassThru -NoNewWindow
+    $installExit = if ($null -eq $installProc.ExitCode) { 1 } else { [int]$installProc.ExitCode }
+    if ($installExit -ne 0) {
+        Write-Log "scripts\install-env.ps1 failed with exit=$installExit"
+        Pop-Location
+        exit $installExit
+    }
     Write-Log 'scripts\install-env.ps1 completed successfully.'
-}
-
-Write-Host 'Python environment is ready. Launching client.py (Please be patient, it may take some time for the first use.) ...'
-
-# --- Launch client.py ---
-if ($ImagePath -eq '--continue') {
-    Write-Log 'Launching scripts\client.py --continue.'
-    & $VenvPy scripts\client.py --continue
 } else {
-    Write-Log "Launching scripts\client.py --image-path `"$ImagePath`" -i `"$UserPrompt`"."
-    & $VenvPy scripts\client.py --image-path $ImagePath -i $UserPrompt
+    Write-Log 'Skipping scripts\install-env.ps1 for --continue.'
 }
-$exitCode = if ($null -eq $LASTEXITCODE) { 1 } else { [int]$LASTEXITCODE }
-Write-Log "scripts\client.py exited with code $exitCode"
+
+if (-not (Test-Path -LiteralPath $VenvPy)) {
+    Write-Host "ERROR: Python venv not found at $VenvPy"
+    Write-Log "ERROR: missing venv python $VenvPy"
+    Pop-Location
+    exit 1
+}
+
+# --- Launch inference client (and auto-resume download if needed) ---
+# client.py exit 3 = model still downloading / pending request saved.
+# Previously the agent had to manually re-invoke --continue; that looked like
+# "run.ps1 only did env check, then you must call the low-level client again".
+# Auto-loop here so one run.ps1 invocation owns the full edit lifecycle.
+Write-Stage '[2/3] Start inference client (server + model load + generate)'
+Write-Host 'Do not stop after env check — inference runs in client.py next.'
+
+$MaxContinueRounds = 120  # ~hours of download if each round returns quickly
+$round = 0
+$exitCode = 1
+$useContinue = $ContinueOnly
+
+while ($round -le $MaxContinueRounds) {
+    $round++
+    if ($useContinue) {
+        Write-Host "Launching client.py --continue (round $round) ..."
+        Write-Log "Launching scripts\client.py --continue (round $round)."
+        & $VenvPy -u scripts\client.py --continue
+    } else {
+        Write-Host 'Launching client.py for image edit ...'
+        Write-Log "Launching scripts\client.py --image-path `"$ImagePath`" -i `"$UserPrompt`"."
+        & $VenvPy -u scripts\client.py --image-path $ImagePath -i $UserPrompt
+    }
+    $exitCode = if ($null -eq $LASTEXITCODE) { 1 } else { [int]$LASTEXITCODE }
+    Write-Log "scripts\client.py exited with code $exitCode (round $round)"
+
+    if ($exitCode -ne 3) {
+        break
+    }
+
+    Write-Stage '[2/3] Model still downloading — auto-continue (do not call client.py separately)'
+    Write-Host 'client.py exit 3: download in progress. Re-entering automatically...'
+    $useContinue = $true
+    Start-Sleep -Seconds 3
+}
+
+if ($exitCode -eq 0) {
+    Write-Stage '[3/3] Inference finished'
+} else {
+    Write-Stage "[3/3] Inference stopped (exit=$exitCode)"
+    if ($exitCode -eq 3) {
+        Write-Host 'Model download still incomplete after auto-continue budget.'
+        Write-Host 'You may re-run: scripts\run.ps1 --continue'
+    }
+}
+
 Pop-Location
 exit $exitCode
-
