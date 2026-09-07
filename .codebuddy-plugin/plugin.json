@@ -38,6 +38,7 @@
   "quickPrompts": [
     { "en": "Change the background of this photo to a beach sunset", "zh": "帮我把这张照片背景换成海边日落" },
     { "en": "Remove the watermark from this image", "zh": "帮我去掉这张图上的水印" },
-    { "en": "Change my ID photo background to blue", "zh": "帮我把证件照底色换成蓝色" }
+    { "en": "Change my ID photo background to blue", "zh": "帮我把证件照底色换成蓝色" },
+    { "en": "Remove the distracting objects and clutter from this photo", "zh": "帮我把这张照片里的杂物和路人去掉" }
   ]
 }
