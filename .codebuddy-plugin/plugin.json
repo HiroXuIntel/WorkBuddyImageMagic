@@ -25,8 +25,8 @@
   "avatar": "avatars/expert.png",
   "categoryId": "06-ContentCreative",
   "defaultInitPrompt": {
-    "zh": "帮我把这张照片背景换成海边日落",
-    "en": "Change the background of this photo to a beach sunset"
+    "zh": "请将这张照片的背景替换为海边日落场景，严格保留人物/主体的外形、姿态与细节不变，并使新背景与主体光影自然衔接",
+    "en": "Please replace the background of this photo with a beach sunset. Keep the subject’s appearance, pose, and details unchanged, and blend the new background with natural lighting"
   },
   "plugin": "photo-magic",
   "license": "Intel OBL Distribution",
@@ -37,9 +37,21 @@
     { "en": "Clutter Removal", "zh": "去杂物" }
   ],
   "quickPrompts": [
-    { "en": "Change the background of this photo to a beach sunset", "zh": "帮我把这张照片背景换成海边日落" },
-    { "en": "Remove the watermark from this image", "zh": "帮我去掉这张图上的水印" },
-    { "en": "Change my ID photo background to blue", "zh": "帮我把证件照底色换成蓝色" },
-    { "en": "Remove the distracting objects and clutter from this photo", "zh": "帮我把这张照片里的杂物和路人去掉" }
+    {
+      "en": "Please replace the background of this photo with a beach sunset. Keep the subject’s appearance, pose, and details unchanged, and blend the new background with natural lighting",
+      "zh": "请将这张照片的背景替换为海边日落场景，严格保留人物/主体的外形、姿态与细节不变，并使新背景与主体光影自然衔接"
+    },
+    {
+      "en": "Please remove the corner mark, timestamp, or overlay I added to this image, and naturally restore the covered area.",
+      "zh": "请去掉这张图上我自己添加的角标、时间戳或遮挡标记，并自然还原被遮挡区域"
+    },
+    {
+      "en": "Please change this ID photo’s background to solid blue. Keep facial features and clothing, do not reshape the face or hair outline",
+      "zh": "请将这张证件照背景换成纯蓝色，保留五官与着装、不改脸型与发丝轮廓"
+    },
+    {
+      "en": "Please remove clutter and passersby from this photo, fill the gaps in the background as cleanly as possible, and keep the rest of the scene and composition intact",
+      "zh": "请去掉这张照片中的杂物与路人，尽量智能填补背景空隙，并完整保留其余画面主体与构图"
+    }
   ]
 }

@@ -35,7 +35,7 @@ def test_img2img_identity_and_model_are_configured():
     )
     assert "./skills/local-img2img" in plugin
     assert "去杂物" in plugin or "Clutter Removal" in plugin
-    # Four capability prompts (not limited to three).
+    # Four capability prompts in plugin.json (tags + quickPrompts).
     assert plugin.count('"zh":') >= 8
 
 
