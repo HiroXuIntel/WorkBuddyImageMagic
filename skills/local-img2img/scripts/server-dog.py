@@ -1,9 +1,10 @@
-"""Shared server-dog process for AI skills.
+"""Lifecycle supervisor for the local image inference server.
 
-A singleton process that brokers the lifecycle of per-skill ``server.py``
-processes. Listens on ``\\\\.\\pipe\\skill-server-dog`` and accepts
+A singleton process that supervises ``server.py`` while it is alive. Listens
+on a Photo Magic namespaced pipe and accepts
 ``start_server`` / ``keepalive`` / ``status`` / ``shutdown`` requests.
-See ``docs/superpowers/specs/2026-05-26-shared-server-dog-design.md``.
+Once a server has existed, the dog exits as soon as the registry becomes empty
+so it is never reused by a later WorkBuddy sandbox session.
 """
 
 from __future__ import annotations
@@ -22,8 +23,9 @@ from typing import Optional
 
 import psutil
 
-PIPE_ADDRESS = r"\\.\pipe\skill-server-dog"
-AUTHKEY = b"skill-server-dog"
+PIPE_ADDRESS = r"\\.\pipe\photo-magic-server-dog-v1"
+AUTHKEY = b"photo-magic-server-dog-v1"
+DOG_PROTOCOL_VERSION = 3
 NO_EVICTION_ENV = "INTEL_SKILL_DOG_NO_EVICTION"
 SYS_MEM_FLOOR_GB = 1.0
 SERVER_BOOT_TIMEOUT = 60.0
@@ -32,7 +34,17 @@ SHUTDOWN_GRACE_S = 10.0
 EVICTION_WAIT_S = 15.0
 CLAW_POLL_INTERVAL_S = 30.0
 STATE_RUNNING = "running"
+BUSY_STATES = {"starting", "downloading", "loading", "generating"}
 log = logging.getLogger("server-dog")
+
+
+def _data_root() -> Path:
+    return Path(
+        os.environ.get(
+            "LOCAL_IMG2IMG_DATA_DIR",
+            str(Path(os.environ.get("USERPROFILE", str(Path.home()))) / ".openvino" / "photo-magic"),
+        )
+    ).expanduser().resolve()
 
 
 DEFAULT_SERVER_ALIVE_TIMEOUT = 300.0
@@ -51,10 +63,13 @@ class ServerRecord:
     started_at: float
     last_used_at: float
     server_alive_timeout: float = DEFAULT_SERVER_ALIVE_TIMEOUT
+    process_create_time: float = 0.0
+    unreachable_checks: int = 0
+    unreachable_max_checks: int = 3
 
     def to_dict(self) -> dict:
         d = asdict(self)
-        d["authkey"] = self.authkey.decode("latin-1")
+        d.pop("authkey", None)
         return d
 
 
@@ -85,7 +100,16 @@ class Registry:
             if record is None:
                 return False
             record.last_used_at = time.monotonic()
+            record.unreachable_checks = 0
             return True
+
+    def mark_unreachable(self, skill_name: str) -> int:
+        with self._lock:
+            record = self._records.get(skill_name)
+            if record is None:
+                return 0
+            record.unreachable_checks += 1
+            return record.unreachable_checks
 
     def pick_lru(self, exclude: str) -> Optional[ServerRecord]:
         with self._lock:
@@ -143,50 +167,131 @@ def _cleaned_env() -> dict[str, str]:
     }
 
 
+def _direct_venv_interpreter(venv_python: str, env: dict[str, str]) -> str:
+    """Resolve uv's launcher to CPython so a persistent dog spawns only once.
+
+    WorkBuddy permits the dog to create the requested server process, but uv's
+    small venv launcher then tries to create a second child and can be denied by
+    the sandbox. Running the base interpreter directly with the venv's
+    site-packages on PYTHONPATH avoids that second process boundary.
+    """
+    launcher = Path(venv_python)
+    venv_root = launcher.parent.parent
+    config_path = venv_root / "pyvenv.cfg"
+    try:
+        config: dict[str, str] = {}
+        for line in config_path.read_text(encoding="utf-8-sig").splitlines():
+            key, separator, value = line.partition("=")
+            if separator:
+                config[key.strip().casefold()] = value.strip()
+        home = Path(config["home"])
+        direct = home / launcher.name
+    except (OSError, KeyError):
+        return venv_python
+
+    site_packages = venv_root / "Lib" / "site-packages"
+    current_pythonpath = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = os.pathsep.join(
+        part for part in (str(site_packages), current_pythonpath) if part
+    )
+    env["VIRTUAL_ENV"] = str(venv_root)
+    env["PATH"] = os.pathsep.join(
+        part for part in (str(venv_root / "Scripts"), env.get("PATH", "")) if part
+    )
+    return str(direct)
+
+
 def _spawn_server(
     venv_python: str,
     server_path: str,
     pipe_address: str,
     authkey: bytes,
     extra_env: dict | None = None,
-) -> subprocess.Popen:
+) -> tuple[int, float]:
     """Spawn the per-skill server.py and wait for its pipe to come up.
 
-    Raises RuntimeError on timeout (after terminating the child process).
+    Return the PID and creation time reported by the real server process.
+
+    ``uv`` virtual environments may use a small ``pythonw.exe`` trampoline
+    which exits before the actual Python child has bound its pipe.  Therefore
+    launcher exit is not treated as server failure until a short grace period
+    has elapsed.
     """
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    cwd = Path(os.environ.get("USERPROFILE", str(Path.home()))) / ".openvino"
+    cwd = _data_root()
     cwd.mkdir(parents=True, exist_ok=True)
+    log_dir = cwd / "log"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    # One file per launch prevents warnings from a previous successful process
+    # from being reported as the reason a later launcher exited.
+    launch_stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    boot_log = log_dir / f"img2img-server-boot-{launch_stamp}.log"
 
     env = _cleaned_env()
     if extra_env:
         env.update({str(k): str(v) for k, v in extra_env.items()})
+    server_python = _direct_venv_interpreter(venv_python, env)
+    log.info("server interpreter: %s", server_python)
 
-    proc = subprocess.Popen(
-        [venv_python, server_path],
-        creationflags=creationflags,
-        startupinfo=_hidden_startupinfo(),
-        close_fds=True,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        cwd=str(cwd),
-        env=env,
-    )
+    with boot_log.open("a", encoding="utf-8") as boot_stream:
+        boot_stream.write(f"\n[{datetime.now().isoformat()}] launching {server_path}\n")
+        boot_stream.flush()
+        proc = subprocess.Popen(
+            [server_python, server_path],
+            creationflags=creationflags,
+            startupinfo=_hidden_startupinfo(),
+            close_fds=True,
+            stdin=subprocess.DEVNULL,
+            stdout=boot_stream,
+            stderr=subprocess.STDOUT,
+            cwd=str(cwd),
+            env=env,
+        )
 
     deadline = time.monotonic() + SERVER_BOOT_TIMEOUT
+    launcher_exit_at: float | None = None
+    launcher_exit_code: int | None = None
     while time.monotonic() < deadline:
-        if proc.poll() is not None:
-            raise RuntimeError(
-                f"server_died_during_boot (pipe={pipe_address}, exit={proc.returncode})"
-            )
         try:
             conn = Client(pipe_address, authkey=authkey)
-            conn.close()
-            log.info("server up: pid=%s pipe=%s", proc.pid, pipe_address)
-            return proc
-        except (FileNotFoundError, OSError, EOFError):
-            time.sleep(SERVER_BOOT_POLL_INTERVAL)
+            try:
+                conn.send({"op": "status"})
+                if conn.poll(5.0):
+                    reply = conn.recv()
+                    server_pid = reply.get("pid") if isinstance(reply, dict) else None
+                    if isinstance(server_pid, int) and server_pid > 0:
+                        create_time = psutil.Process(server_pid).create_time()
+                        log.info(
+                            "server up: pid=%s launcher_pid=%s pipe=%s",
+                            server_pid, proc.pid, pipe_address,
+                        )
+                        return server_pid, create_time
+            finally:
+                conn.close()
+        except (FileNotFoundError, OSError, EOFError, psutil.Error):
+            pass
+
+        exit_code = proc.poll()
+        if exit_code is not None:
+            if launcher_exit_at is None:
+                launcher_exit_at = time.monotonic()
+                launcher_exit_code = exit_code
+                log.info(
+                    "server launcher pid=%s exited with code=%s; waiting for delegated child",
+                    proc.pid, exit_code,
+                )
+            elif time.monotonic() - launcher_exit_at >= 10.0:
+                try:
+                    tail = " | ".join(
+                        boot_log.read_text(encoding="utf-8", errors="replace").splitlines()[-20:]
+                    )
+                except OSError:
+                    tail = "<boot log unreadable>"
+                raise RuntimeError(
+                    f"server_died_during_boot (pipe={pipe_address}, launcher_exit={launcher_exit_code}, "
+                    f"boot_log={boot_log}, tail={tail})"
+                )
+        time.sleep(SERVER_BOOT_POLL_INTERVAL)
 
     log.warning("server pipe %s did not come up within %.1fs; terminating pid=%s",
                 pipe_address, SERVER_BOOT_TIMEOUT, proc.pid)
@@ -264,13 +369,16 @@ def _evict_record(record: ServerRecord, poll_interval: float = 0.5) -> bool:
                 record.skill_name, record.pid)
     try:
         proc = psutil.Process(record.pid)
+        if record.process_create_time and abs(proc.create_time() - record.process_create_time) > 0.01:
+            log.error("refusing to kill reused pid=%s for %s", record.pid, record.skill_name)
+            return False
         proc.kill()
         proc.wait(timeout=5.0)
     except (psutil.NoSuchProcess, psutil.TimeoutExpired):
         pass
     except Exception as exc:
         log.warning("evict %s: kill failed: %s", record.skill_name, exc)
-    return True
+    return not psutil.pid_exists(record.pid)
 
 
 class DogState:
@@ -279,6 +387,16 @@ class DogState:
         self.claw_name: Optional[str] = None
         self.claw_thread: Optional[threading.Thread] = None
         self.shutdown_event = threading.Event()
+        self.lifecycle_lock = threading.Lock()
+        self.claw_miss_count = 0
+        self.ever_had_server = False
+
+
+def _shutdown_if_serverless(state: DogState, reason: str) -> None:
+    """Stop the dog after its supervised server lifecycle has ended."""
+    if state.ever_had_server and not state.registry.all():
+        log.info("no inference servers remain (%s); stopping server-dog", reason)
+        state.shutdown_event.set()
 
 
 def _validate_start_request(request: dict) -> Optional[str]:
@@ -303,10 +421,22 @@ def _handle_start_server(state: DogState, request: dict) -> dict:
     existing = state.registry.get(skill_name)
     if existing is not None:
         if psutil.pid_exists(existing.pid):
-            state.registry.bump_last_used(skill_name)
-            if state.claw_name is None and claw_name:
-                state.claw_name = claw_name
-            return {"ok": True, "pid": existing.pid}
+            server_state = _query_server_state(existing)
+            if server_state is not None:
+                state.registry.bump_last_used(skill_name)
+                if state.claw_name is None and claw_name:
+                    state.claw_name = claw_name
+                return {"ok": True, "pid": existing.pid, "state": server_state}
+            checks = state.registry.mark_unreachable(skill_name)
+            if checks < existing.unreachable_max_checks:
+                log.warning(
+                    "existing server pid=%s temporarily unreachable (%s/%s); preserving it",
+                    existing.pid, checks, existing.unreachable_max_checks,
+                )
+                return {"ok": True, "pid": existing.pid, "state": "unreachable"}
+            log.warning("existing server pid=%s remains unresponsive; replacing it", existing.pid)
+            _evict_record(existing)
+            state.registry.pop(skill_name)
         else:
             log.info("stale record for %s (pid=%s gone), respawning",
                      skill_name, existing.pid)
@@ -322,15 +452,18 @@ def _handle_start_server(state: DogState, request: dict) -> dict:
 
             lru = state.registry.pick_lru(exclude=skill_name)
             if lru is None:
-                break
-            
+                return {"ok": False, "error": "not_enough_memory"}
+            lru_state = _query_server_state(lru)
+            if lru_state in BUSY_STATES or lru_state is None:
+                return {"ok": False, "error": "not_enough_memory_busy"}
             _evict_record(lru)
             state.registry.pop(lru.skill_name)
-        else:
+        final_ok, _detail = _memory_budget_ok(mem_need_gb)
+        if not final_ok:
             return {"ok": False, "error": "not_enough_memory"}
 
     try:
-        proc = _spawn_server(
+        server_pid, process_create_time = _spawn_server(
             venv_python=request["venv_python"],
             server_path=request["server_path"],
             pipe_address=request["pipe_address"],
@@ -338,6 +471,11 @@ def _handle_start_server(state: DogState, request: dict) -> dict:
             extra_env=request.get("extra_env") or None,
         )
     except RuntimeError as exc:
+        # A dog created inside one WorkBuddy sandbox must not remain available
+        # after its child fails to boot; a later request needs a fresh dog with
+        # the current session's process permissions.
+        log.warning("server boot failed; stopping server-dog: %s", exc)
+        state.shutdown_event.set()
         return {"ok": False, "error": str(exc)}
 
     raw_timeout = request.get("server_alive_timeout", DEFAULT_SERVER_ALIVE_TIMEOUT)
@@ -345,12 +483,16 @@ def _handle_start_server(state: DogState, request: dict) -> dict:
         server_alive_timeout = float(raw_timeout)
     except (TypeError, ValueError):
         server_alive_timeout = DEFAULT_SERVER_ALIVE_TIMEOUT
+    try:
+        unreachable_max_checks = max(1, int(request.get("server_unreachable_max_checks", 3)))
+    except (TypeError, ValueError):
+        unreachable_max_checks = 3
 
     now = time.monotonic()
     state.registry.put(
         ServerRecord(
             skill_name=skill_name,
-            pid=proc.pid,
+            pid=server_pid,
             pipe_address=request["pipe_address"],
             authkey=_bytes_authkey(request["authkey"]),
             venv_python=request["venv_python"],
@@ -359,12 +501,15 @@ def _handle_start_server(state: DogState, request: dict) -> dict:
             started_at=now,
             last_used_at=now,
             server_alive_timeout=server_alive_timeout,
+            process_create_time=process_create_time,
+            unreachable_max_checks=unreachable_max_checks,
         )
     )
+    state.ever_had_server = True
     if state.claw_name is None and claw_name:
         state.claw_name = claw_name
         log.info("recorded claw_name=%s", claw_name)
-    return {"ok": True, "pid": proc.pid}
+    return {"ok": True, "pid": server_pid}
 
 
 def _handle_keepalive(state: DogState, request: dict) -> dict:
@@ -376,6 +521,7 @@ def _handle_keepalive(state: DogState, request: dict) -> dict:
 def _handle_status(state: DogState, request: dict) -> dict:
     return {
         "ok": True,
+        "protocol_version": DOG_PROTOCOL_VERSION,
         "claw_name": state.claw_name,
         "servers": [r.to_dict() for r in state.registry.all()],
     }
@@ -386,6 +532,18 @@ def _handle_shutdown(state: DogState, request: dict) -> dict:
     return {"ok": True}
 
 
+def _handle_stop_server(state: DogState, request: dict) -> dict:
+    skill_name = request.get("skill_name") or ""
+    record = state.registry.get(skill_name)
+    if record is None:
+        return {"ok": True, "stopped": False}
+    stopped = _evict_record(record)
+    if stopped:
+        state.registry.pop(skill_name)
+        _shutdown_if_serverless(state, "server stopped")
+    return {"ok": stopped, "stopped": stopped, "error": None if stopped else "failed_to_stop"}
+
+
 def _dispatch(state: DogState, request: dict) -> dict:
     op = request.get("op")
     handler_name = {
@@ -393,11 +551,15 @@ def _dispatch(state: DogState, request: dict) -> dict:
         "keepalive": "_handle_keepalive",
         "status": "_handle_status",
         "shutdown": "_handle_shutdown",
+        "stop_server": "_handle_stop_server",
     }.get(op)
     if handler_name is None:
         return {"ok": False, "error": "unknown_op"}
     handler = globals()[handler_name]
     try:
+        if op in {"start_server", "stop_server"}:
+            with state.lifecycle_lock:
+                return handler(state, request)
         return handler(state, request)
     except Exception as exc:
         log.exception("handler %s failed", op)
@@ -436,6 +598,11 @@ def _claw_watch_once(state: DogState) -> None:
     if not state.claw_name:
         return
     if _claw_is_running(state.claw_name):
+        state.claw_miss_count = 0
+        return
+    state.claw_miss_count += 1
+    if state.claw_miss_count < 3:
+        log.warning("claw %s not detected (%s/3); waiting before teardown", state.claw_name, state.claw_miss_count)
         return
     log.info("claw %s no longer running, evicting all servers", state.claw_name)
     for record in state.registry.all():
@@ -466,14 +633,20 @@ def _keepalive_timeout_check(state: DogState) -> None:
         elapsed = now - record.last_used_at
         if elapsed > record.server_alive_timeout:
             server_state = _query_server_state(record)
-            if server_state is not None and server_state != STATE_RUNNING:
+            if server_state in BUSY_STATES:
                 log.info(
-                    "keepalive timeout for %s but state=%s (not running), "
+                    "keepalive timeout for %s but state=%s (busy), "
                     "resetting last_used_at",
                     record.skill_name, server_state,
                 )
                 state.registry.bump_last_used(record.skill_name)
                 continue
+            if server_state is None:
+                max_checks = record.unreachable_max_checks
+                checks = state.registry.mark_unreachable(record.skill_name)
+                log.warning("server %s unreachable (%s/%s)", record.skill_name, checks, max_checks)
+                if checks < max_checks:
+                    continue
             log.info(
                 "keepalive timeout for %s (%.1fs > %.1fs), shutting down",
                 record.skill_name, elapsed, record.server_alive_timeout,
@@ -483,6 +656,36 @@ def _keepalive_timeout_check(state: DogState) -> None:
             except Exception as exc:
                 log.warning("keepalive eviction failed for %s: %s", record.skill_name, exc)
             state.registry.pop(record.skill_name)
+            with state.lifecycle_lock:
+                _shutdown_if_serverless(state, "idle timeout")
+
+
+def _server_process_is_alive(record: ServerRecord) -> bool:
+    """Return False only when the recorded process is definitely gone/reused."""
+    try:
+        proc = psutil.Process(record.pid)
+        if record.process_create_time:
+            return abs(proc.create_time() - record.process_create_time) <= 0.01
+        return proc.is_running()
+    except (psutil.NoSuchProcess, psutil.ZombieProcess):
+        return False
+    except psutil.AccessDenied:
+        return True
+
+
+def _server_exit_watch_loop(state: DogState) -> None:
+    """Exit the dog promptly when its server dies outside normal eviction."""
+    while not state.shutdown_event.wait(1.0):
+        for record in state.registry.all():
+            if _server_process_is_alive(record):
+                continue
+            with state.lifecycle_lock:
+                current = state.registry.get(record.skill_name)
+                if current is None or current.pid != record.pid:
+                    continue
+                log.warning("inference server exited unexpectedly: %s pid=%s", record.skill_name, record.pid)
+                state.registry.pop(record.skill_name)
+                _shutdown_if_serverless(state, "server process exited")
 
 
 def _keepalive_timeout_loop(state: DogState) -> None:
@@ -494,26 +697,36 @@ def _keepalive_timeout_loop(state: DogState) -> None:
         state.shutdown_event.wait(KEEPALIVE_CHECK_INTERVAL_S)
 
 
+def _handle_connection(conn, state: DogState) -> None:
+    try:
+        if not conn.poll(10.0):
+            return
+        request = conn.recv()
+        if not isinstance(request, dict):
+            conn.send({"ok": False, "error": "bad_request"})
+            return
+        conn.send(_dispatch(state, request))
+    except (EOFError, OSError) as exc:
+        log.info("client disconnected: %s", exc)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def _accept_loop(listener: Listener, state: DogState) -> None:
     while not state.shutdown_event.is_set():
         try:
             conn = listener.accept()
         except OSError:
             return
-        try:
-            request = conn.recv()
-            if not isinstance(request, dict):
-                conn.send({"ok": False, "error": "bad_request"})
-                continue
-            reply = _dispatch(state, request)
-            conn.send(reply)
-        except (EOFError, OSError) as exc:
-            log.info("client disconnected: %s", exc)
-        finally:
-            try:
-                conn.close()
-            except Exception:
-                pass
+        threading.Thread(
+            target=_handle_connection,
+            args=(conn, state),
+            daemon=True,
+            name="dog-client",
+        ).start()
 
 
 def _serve(listener: Listener, state: DogState) -> None:
@@ -527,6 +740,11 @@ def _serve(listener: Listener, state: DogState) -> None:
         target=_claw_watch_loop, args=(state,), daemon=True, name="dog-claw"
     )
     state.claw_thread.start()
+
+    server_watch_thread = threading.Thread(
+        target=_server_exit_watch_loop, args=(state,), daemon=True, name="dog-server-watch"
+    )
+    server_watch_thread.start()
 
     if _no_eviction_enabled():
         log.info("%s=1, skipping keepalive timeout loop", NO_EVICTION_ENV)
@@ -545,7 +763,7 @@ def _serve(listener: Listener, state: DogState) -> None:
 
 
 def _setup_logging() -> None:
-    log_dir = Path(os.environ.get("USERPROFILE", str(Path.home()))) / ".openvino" / "log"
+    log_dir = _data_root() / "log"
     log_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     log_file = log_dir / f"server-dog-py-{timestamp}.log"

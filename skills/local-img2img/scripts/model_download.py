@@ -41,12 +41,16 @@ class ModelInfo:
     model_id: str
     dir_name: str
     required_files: tuple[str, ...]
+    revision: str | None = None
     # Optional allowlist of glob patterns passed to snapshot_download so only the
     # needed files are fetched. Repos that ship the same weights in several
     # frameworks (PyTorch + TF + Flax + Rust + ONNX + CoreML, e.g. BERT /
     # Opus-MT) would otherwise download gigabytes of unused duplicates. ``None``
     # downloads the full snapshot (the default for most models).
     allow_patterns: tuple[str, ...] | None = None
+
+
+REVISION_MARKER = ".photo-magic-revision"
 
 
 def validate_model_dir(local_dir: Path, required_files: Sequence[str]) -> ModelValidation:
@@ -92,6 +96,28 @@ def validate_model_dir(local_dir: Path, required_files: Sequence[str]) -> ModelV
     return ModelValidation(ok=True)
 
 
+def validate_installed_model(local_dir: Path, model: ModelInfo) -> ModelValidation:
+    """Validate payload completeness and the pinned model revision."""
+    validation = validate_model_dir(local_dir, model.required_files)
+    if not validation.ok:
+        return validation
+    if model.revision:
+        marker = local_dir / REVISION_MARKER
+        try:
+            installed_revision = marker.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            return ModelValidation(ok=False, reason=f"cannot read revision marker: {exc}")
+        if installed_revision != model.revision:
+            return ModelValidation(
+                ok=False,
+                reason=(
+                    f"revision mismatch: expected {model.revision}, "
+                    f"found {installed_revision or '<empty>'}"
+                ),
+            )
+    return ModelValidation(ok=True)
+
+
 def _assert_under_models_root(path: Path, models_root: Path) -> Path:
     resolved = path.resolve()
     root_resolved = models_root.resolve()
@@ -120,6 +146,12 @@ def _backup_invalid_model_dir(local_dir: Path, models_root: Path) -> Path:
         backup_dir = local_dir.with_name(f"{local_dir.name}.invalid-{suffix}")
     _assert_under_models_root(backup_dir, models_root)
     os.replace(local_dir, backup_dir)
+    # Broken weights can be downloaded again. Retain only the newest backup so
+    # repeated recovery attempts cannot fill the user's disk with multi-GB
+    # invalid model trees.
+    for old_backup in models_root.glob(f"{local_dir.name}.invalid-*"):
+        if old_backup != backup_dir:
+            _remove_tree_safely(old_backup, models_root)
     return backup_dir
 
 
@@ -157,7 +189,7 @@ def _emit(logger: Callable[[str], None] | None, message: str) -> None:
 # user with progress lines, but the lines we do show have to carry a current
 # speed/ETA rather than a 5-minute average — so fast samples feed a slow
 # display (see PROGRESS_DISPLAY_INTERVAL / should_display_progress).
-PROGRESS_SAMPLE_INTERVAL = 0.5
+PROGRESS_SAMPLE_INTERVAL = 2.0
 
 # How often a *user-visible* download progress line may be emitted. The first
 # line is shown as soon as a download starts, then at most one line per
@@ -454,6 +486,11 @@ def download_required_model(
         for attempt in range(1, attempts + 1):
             try:
                 snapshot_download(model_id, **snapshot_kwargs)
+                revision = snapshot_kwargs.get("revision")
+                if revision:
+                    (partial_dir / ".photo-magic-revision").write_text(
+                        str(revision) + "\n", encoding="utf-8"
+                    )
                 break
             except Exception as exc:  # noqa: BLE001 — surface AND retry any download error
                 if attempt >= attempts:
@@ -503,6 +540,7 @@ def load_model_infos(info_json_path: Path) -> list[ModelInfo]:
             model_id=m["model_id"],
             dir_name=m["dir_name"],
             required_files=tuple(m["required_files"]),
+            revision=m.get("revision"),
             allow_patterns=tuple(m["allow_patterns"]) if m.get("allow_patterns") else None,
         )
         for m in models_raw
@@ -543,11 +581,76 @@ def _promote_partial_model(local_dir: Path, models_root: Path, logger=None) -> b
             return False
 
 
+def _migrate_legacy_model(
+    model: ModelInfo,
+    local_dir: Path,
+    models_root: Path,
+    legacy_models_roots: Sequence[Path],
+    logger: Callable[[str], None] | None = None,
+) -> bool:
+    """Safely copy an existing legacy model into the plugin data directory.
+
+    The source is intentionally trusted and preserved: discovering the legacy
+    directory is enough to reuse it. The copy is staged, marked with the pinned
+    revision, then atomically renamed. An operational migration failure is
+    raised rather than being mistaken for a reason to download.
+    """
+    destination = local_dir.resolve()
+    attempt_marker = models_root / f".{model.dir_name}.legacy-migrated"
+    _assert_under_models_root(attempt_marker, models_root)
+    if attempt_marker.exists():
+        _emit(logger, "legacy model was already migrated once; use normal recovery flow")
+        return False
+    for legacy_root in legacy_models_roots:
+        source = Path(legacy_root).expanduser() / model.dir_name
+        try:
+            source_resolved = source.resolve()
+        except OSError:
+            continue
+        if source_resolved == destination:
+            continue
+
+        if not source.is_dir():
+            continue
+
+        models_root.mkdir(parents=True, exist_ok=True)
+        staging = local_dir.with_name(f"{local_dir.name}.migration-partial")
+        _assert_under_models_root(staging, models_root)
+        if staging.exists():
+            _remove_tree_safely(staging, models_root)
+        _emit(logger, f"migrating existing legacy model {source} -> {local_dir}")
+        replaced_dir: Path | None = None
+        try:
+            shutil.copytree(source, staging, copy_function=shutil.copy2)
+            if model.revision:
+                (staging / REVISION_MARKER).write_text(
+                    model.revision + "\n", encoding="utf-8"
+                )
+            if local_dir.exists():
+                replaced_dir = _backup_invalid_model_dir(local_dir, models_root)
+                _emit(logger, f"preserved incomplete plugin model -> {replaced_dir}")
+            attempt_marker.write_text(str(source) + "\n", encoding="utf-8")
+            os.replace(staging, local_dir)
+        except Exception as exc:
+            attempt_marker.unlink(missing_ok=True)
+            if staging.exists():
+                _remove_tree_safely(staging, models_root)
+            if replaced_dir is not None and replaced_dir.exists() and not local_dir.exists():
+                os.replace(replaced_dir, local_dir)
+            raise RuntimeError(
+                f"failed to migrate legacy model from {source}: {exc}"
+            ) from exc
+        _emit(logger, f"migrated legacy model successfully -> {local_dir}")
+        return True
+    return False
+
+
 def ensure_models(
     models: list[ModelInfo],
     models_root: Path,
     logger: Callable[[str], None] | None = None,
     progress_callback: Callable[[dict], None] | None = None,
+    legacy_models_roots: Sequence[Path] = (),
 ) -> None:
     """Validate and download all models that aren't already present.
 
@@ -558,21 +661,34 @@ def ensure_models(
     A finished ``.partial`` directory with all required files is promoted once
     and never re-downloaded. Incomplete partials are resumed in place.
     """
+    models_root = Path(models_root)
+    legacy_models_roots = tuple(Path(path) for path in legacy_models_roots)
+
+    migrated: set[str] = set()
     for m in models:
         local_dir = models_root / m.dir_name
-        if validate_model_dir(local_dir, m.required_files).ok:
+        if validate_installed_model(local_dir, m).ok:
+            continue
+        if _migrate_legacy_model(
+            m, local_dir, models_root, legacy_models_roots, logger=logger
+        ):
+            migrated.add(m.dir_name)
             continue
         partial_dir = local_dir.with_name(f"{local_dir.name}.partial")
-        if validate_model_dir(partial_dir, m.required_files).ok:
+        if validate_installed_model(partial_dir, m).ok:
             if _promote_partial_model(local_dir, models_root, logger=logger):
                 continue
 
     missing = [
         m for m in models
-        if not validate_model_dir(models_root / m.dir_name, m.required_files).ok
+        if m.dir_name not in migrated
+        and not validate_installed_model(models_root / m.dir_name, m).ok
     ]
     if not missing:
-        _emit(logger, "all required models already present; skip download")
+        if migrated:
+            _emit(logger, "legacy model migration complete; skip download")
+        else:
+            _emit(logger, "all required models already present; skip download")
         return
 
     try:
@@ -580,7 +696,7 @@ def ensure_models(
     except ImportError as exc:
         raise RuntimeError(
             "modelscope is required to download models. "
-            "Please run 'scripts\\install-env.ps1' first."
+            "Please re-run the expert's standard Bash entry."
         ) from exc
 
     models_root.mkdir(parents=True, exist_ok=True)
@@ -589,15 +705,15 @@ def ensure_models(
     for index, m in enumerate(missing, start=1):
         local_dir = models_root / m.dir_name
         # Re-check: another process may have finished while we imported modelscope.
-        if validate_model_dir(local_dir, m.required_files).ok:
+        if validate_installed_model(local_dir, m).ok:
             continue
         partial_dir = local_dir.with_name(f"{local_dir.name}.partial")
-        if validate_model_dir(partial_dir, m.required_files).ok and _promote_partial_model(
+        if validate_installed_model(partial_dir, m).ok and _promote_partial_model(
             local_dir, models_root, logger=logger
         ):
             continue
 
-        validation = validate_model_dir(local_dir, m.required_files)
+        validation = validate_installed_model(local_dir, m)
         if validation.reason and validation.reason != "directory missing":
             _emit(logger, f"model {m.model_id} is incomplete: {validation.reason}; resuming download")
         elif partial_dir.is_dir():
@@ -606,9 +722,10 @@ def ensure_models(
         template = ModelDownloadTemplate(
             models_root=models_root,
             required_files=m.required_files,
-            snapshot_kwargs=(
-                {"allow_patterns": list(m.allow_patterns)} if m.allow_patterns else None
-            ),
+            snapshot_kwargs={
+                **({"allow_patterns": list(m.allow_patterns)} if m.allow_patterns else {}),
+                **({"revision": m.revision} if m.revision else {}),
+            },
         )
         try:
             download_required_model(
@@ -628,9 +745,10 @@ def ensure_models(
     clear_download_progress()
 
     failed = [
-        f"{m.model_id} ({validate_model_dir(models_root / m.dir_name, m.required_files).reason})"
+        f"{m.model_id} ({validate_installed_model(models_root / m.dir_name, m).reason})"
         for m in models
-        if not validate_model_dir(models_root / m.dir_name, m.required_files).ok
+        if m.dir_name not in migrated
+        and not validate_installed_model(models_root / m.dir_name, m).ok
     ]
     if failed:
         raise RuntimeError(f"model download did not complete: {', '.join(failed)}")
@@ -655,5 +773,6 @@ __all__ = [
     "invalidate_model_dir",
     "load_model_infos",
     "load_skill_info",
+    "validate_installed_model",
     "validate_model_dir",
 ]

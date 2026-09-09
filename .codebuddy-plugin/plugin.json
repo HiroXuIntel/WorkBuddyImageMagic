@@ -1,9 +1,9 @@
 {
   "name": "photo-magic",
-  "version": "1.0.0",
+  "version": "1.1.9",
   "description": "One-sentence photo retoucher powered by local AI image-to-image on Intel AIPC",
   "author": {
-    "name": "iBuddy Team",
+    "name": "Haoruo Xu",
     "email": "haoruo.xu@intel.com"
   },
   "agents": ["./agents/photo-magic.md"],
@@ -19,8 +19,8 @@
     "zh": "AI 修图管家"
   },
   "displayDescription": {
-    "en": "One-sentence photo retoucher driven by local AI image-to-image. Swap backgrounds, remove watermarks, change ID-photo background colors, and clean up clutter in seconds.",
-    "zh": "一句话修图管家，本地 AI 图生图驱动，换背景、去水印、证件照换底色、去杂物，几秒输出专业级效果。"
+    "en": "Local AI photo editing for background swaps, mark and clutter removal, ID photos, product scenes, natural portraits, and old-photo restoration.",
+    "zh": "一句话本地修图，支持换背景、去标记、证件照换底、去杂物、商品场景、人像美颜和老照片修复。"
   },
   "avatar": "avatars/expert.png",
   "categoryId": "06-ContentCreative",
@@ -29,12 +29,14 @@
     "en": "Please replace the background of this photo with a beach sunset. Keep the subject’s appearance, pose, and details unchanged, and blend the new background with natural lighting"
   },
   "plugin": "photo-magic",
-  "license": "Intel OBL Distribution",
   "tags": [
     { "en": "Background Swap", "zh": "换背景" },
-    { "en": "Watermark Removal", "zh": "去水印" },
-    { "en": "ID Photo", "zh": "证件照" },
-    { "en": "Clutter Removal", "zh": "去杂物" }
+    { "en": "Mark Removal", "zh": "去标记" },
+    { "en": "ID Photo Background", "zh": "证件照换底" },
+    { "en": "Clutter Removal", "zh": "去杂物" },
+    { "en": "Product Scenes", "zh": "商品场景" },
+    { "en": "Natural Portrait", "zh": "人像美颜" },
+    { "en": "Old Photo Restoration", "zh": "老照片修复" }
   ],
   "quickPrompts": [
     {
@@ -42,16 +44,28 @@
       "zh": "请将这张照片的背景替换为海边日落场景，严格保留人物/主体的外形、姿态与细节不变，并使新背景与主体光影自然衔接"
     },
     {
-      "en": "Please remove the corner mark, timestamp, or overlay I added to this image, and naturally restore the covered area.",
-      "zh": "请去掉这张图上我自己添加的角标、时间戳或遮挡标记，并自然还原被遮挡区域"
+      "en": "Please remove the mark or timestamp that I own or am authorized to edit, reconstruct the covered area naturally, and preserve the rest of the image",
+      "zh": "请移除这张图片中由我拥有或已获授权处理的标记/时间戳，自然补全被遮挡区域，并尽量保持其余画面不变"
     },
     {
-      "en": "Please change this ID photo’s background to solid blue. Keep facial features and clothing, do not reshape the face or hair outline",
-      "zh": "请将这张证件照背景换成纯蓝色，保留五官与着装、不改脸型与发丝轮廓"
+      "en": "Please change this ID photo background to solid blue. Keep the person’s facial features, face shape, hairstyle, clothing, and identity unchanged",
+      "zh": "请将这张证件照的背景更换为纯蓝色，保持人物五官、脸型、发型、服装和身份特征不变"
     },
     {
-      "en": "Please remove clutter and passersby from this photo, fill the gaps in the background as cleanly as possible, and keep the rest of the scene and composition intact",
-      "zh": "请去掉这张照片中的杂物与路人，尽量智能填补背景空隙，并完整保留其余画面主体与构图"
+      "en": "Please remove the distracting objects from this photo, reconstruct the background naturally, and preserve the main subject and composition",
+      "zh": "请移除这张照片中的杂物和干扰元素，自然补全背景，并尽量保留主体和原有构图"
+    },
+    {
+      "en": "Please place this product in a clean studio setting with natural commercial lighting. Preserve the product’s shape, color, packaging, and visible details as much as possible",
+      "zh": "请将这张普通商品照改成干净的摄影棚场景，使用自然商业光影，并尽量保留商品外形、颜色、包装和可见细节"
+    },
+    {
+      "en": "Please apply natural portrait retouching: improve skin tone, lightly smooth the skin, and soften blemishes and dark circles without changing facial features, face shape, or identity",
+      "zh": "请对这张人像做自然美颜，改善肤色、轻度磨皮、淡化瑕疵和黑眼圈，不改变五官、脸型与人物身份特征"
+    },
+    {
+      "en": "Please restore this old photo by improving faded colors, noise, slight blur, and small scratches while preserving the people, period character, and original composition",
+      "zh": "请修复这张老照片，改善褪色、噪点、轻微模糊和细小划痕，同时尽量保留人物特征、年代质感与原始构图"
     }
   ]
 }
